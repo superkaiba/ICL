@@ -1,0 +1,53 @@
+
+======== GPU REPORT ========
+
+==============NVSMI LOG==============
+
+Timestamp                                 : Mon Oct 21 17:26:47 2024
+Driver Version                            : 560.35.03
+CUDA Version                              : 12.6
+
+Attached GPUs                             : 1
+GPU 00000000:C4:00.0
+    Accounting Mode                       : Enabled
+    Accounting Mode Buffer Size           : 4000
+    Accounted Processes
+        Process ID                        : 2161323
+            GPU Utilization               : 92 %
+            Memory Utilization            : 83 %
+            Max memory usage              : 15956 MiB
+            Time                          : 29047 ms
+            Is Running                    : 0
+        Process ID                        : 2162306
+            GPU Utilization               : 93 %
+            Memory Utilization            : 85 %
+            Max memory usage              : 15956 MiB
+            Time                          : 29000 ms
+            Is Running                    : 0
+        Process ID                        : 2163298
+            GPU Utilization               : 66 %
+            Memory Utilization            : 60 %
+            Max memory usage              : 15956 MiB
+            Time                          : 39765 ms
+            Is Running                    : 0
+
+Mon Oct 21 17:26:47 2024       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 560.35.03              Driver Version: 560.35.03      CUDA Version: 12.6     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA RTX A6000               On  |   00000000:C4:00.0 Off |                    0 |
+| 30%   39C    P8             30W /  300W |       2MiB /  46068MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI        PID   Type   Process name                              GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+

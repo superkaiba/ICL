@@ -11,7 +11,7 @@ from utils import ast_eval
 @hydra.main(config_path="./configs/", config_name="train", version_base=None)
 def train(cfg):
     seed_everything(cfg.seed)
-
+    print(OmegaConf.to_yaml(cfg))
     dataset = hydra.utils.instantiate(cfg.datamodule)
     task = hydra.utils.instantiate(cfg.task)
     logger = hydra.utils.instantiate(cfg.logger) if cfg.logger else False

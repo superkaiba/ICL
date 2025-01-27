@@ -11,6 +11,10 @@ from models.context_aggregator import ContextAggregator
 from models.implicit import ImplicitModel
 from models.predictor import Predictor
 from utils import torch_pca
+import wandb
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 
 class MetaOptimizerExplicit(ABC, LightningModule):
@@ -131,7 +135,6 @@ class MetaOptimizerExplicit(ABC, LightningModule):
     def log_loss_vs_nsamples(self, mode: Literal["train_tasks", "val_tasks"]):
         if self.logger is None:
             return
-
         # Get the dataloader
         if mode == "train_tasks":
             dl = self.trainer.datamodule.train_dataloader()
@@ -144,8 +147,14 @@ class MetaOptimizerExplicit(ABC, LightningModule):
             None,
             None,
         )
+        loss_train_all, loss_nexttoken_all, loss_ood_all = [], [], []
+        all_x = {key: [] for key in ["x", "y", "x_ood", "y_ood", "y_pred"]}
+
         for x, _ in dl:
             x = {name: x[name].to(self.device) for name in x}
+            for key in all_x:
+                all_x[key].append(x[key])
+
             (
                 preds_train,
                 preds_nexttoken,
@@ -153,8 +162,13 @@ class MetaOptimizerExplicit(ABC, LightningModule):
                 x_nexttoken,
                 z,
             ) = self.forward(x)
+            all_x["y_pred"].append(preds_nexttoken)
+
             loss_train = self.loss_function(x_train, preds_train)
             loss_nexttoken = self.loss_function(x_nexttoken, preds_nexttoken)
+            loss_train_all.append(loss_train)
+            loss_nexttoken_all.append(loss_nexttoken)
+
             loss_train, loss_nexttoken = (
                 loss_train.sum(dim=-1) / num_tasks,
                 loss_nexttoken.sum(dim=-1) / num_tasks,
@@ -167,15 +181,69 @@ class MetaOptimizerExplicit(ABC, LightningModule):
                 n_sample_loss_nexttoken += loss_nexttoken
 
             if self.has_ood:
-                x_ood = {name: x_nexttoken[f"{name}_ood"].to(self.device) for name in ["x", "y"]}
+                x_ood = {
+                    name: x_nexttoken[f"{name}_ood"].to(self.device)
+                    for name in ["x", "y"]
+                }
                 preds_ood = self.predictor.forward(x_ood, z)
                 loss_ood = self.loss_function(x_ood, preds_ood)
+                loss_ood_all.append(loss_ood)
                 loss_ood = loss_ood.sum(dim=-1) / num_tasks
                 if n_sample_loss_ood is None:
                     n_sample_loss_ood = loss_ood
                 else:
                     n_sample_loss_ood += loss_ood
 
+        # Concatenate all tensors for each key
+        all_x = {key: torch.cat(tensors, dim=1) for key, tensors in all_x.items()}
+
+        loss_train_all = torch.cat(loss_train_all, dim=1)
+        loss_nexttoken_all = torch.cat(loss_nexttoken_all, dim=1)
+        loss_ood_all = torch.cat(loss_ood_all, dim=1)
+
+        def plot_top_k_losses(k, step):
+            for i in range(0, 999, step):
+                losses = loss_nexttoken_all[i]
+                top_k_indices = torch.topk(losses, k).indices
+
+                x = all_x["x"][i, top_k_indices].cpu().numpy()
+                y = all_x["y"][i, top_k_indices].cpu().numpy()
+                y_pred = all_x["y_pred"][i, top_k_indices].cpu().numpy()
+
+                fig, axes = plt.subplots(4, k // 4, figsize=(20, 20))
+                axes = (
+                    axes.flatten()
+                )  # Flatten the 2D array of axes for easier indexing
+                fig.suptitle(
+                    f"Top {k} losses at sample {i+self.hparams.min_train_samples}"
+                )
+
+                for j in range(k):
+                    ax = axes[j] if k > 1 else axes
+                    ax.scatter(x[j], y[j], c="blue", label="Actual", alpha=0.7)
+                    ax.scatter(x[j], y_pred[j], c="red", label="Predicted", alpha=0.7)
+                    ax.set_title(
+                        f"Index {top_k_indices[j].item()}, Loss: {losses[top_k_indices[j]].item():.4f}"
+                    )
+                    ax.legend()
+                    ax.set_xlabel("x")
+                    ax.set_ylabel("y")
+
+                plt.tight_layout()
+                wandb_image = wandb.Image(fig)
+                self.logger.experiment.log(
+                    {
+                        f"{mode}/top_{k}_losses_plot_sample_{i+self.hparams.min_train_samples}": wandb_image
+                    }
+                )
+                plt.close(fig)
+
+        # Example usage
+        plot_top_k_losses(k=16, step=100)
+
+        hist_num_bins = 500
+        df = pd.DataFrame(columns=["loss_train", "loss_nexttoken", "loss_ood"])
+        print("Building dataframe")
         for i in range(len(n_sample_loss_train)):
             n_samples = i + self.hparams.min_train_samples
             l_train_i = n_sample_loss_train[i].cpu()
@@ -184,11 +252,75 @@ class MetaOptimizerExplicit(ABC, LightningModule):
                 "n_samples": n_samples,
                 f"{mode}/n_sample_loss_train": l_train_i,
                 f"{mode}/n_sample_loss_nexttoken": l_nexttoken_i,
+                f"{mode}/n_sample_loss_train_hist": wandb.Histogram(
+                    loss_train_all[i].cpu(), num_bins=hist_num_bins
+                ),
+                f"{mode}/n_sample_loss_nexttoken_hist": wandb.Histogram(
+                    loss_nexttoken_all[i].cpu(), num_bins=hist_num_bins
+                ),
             }
             if self.has_ood:
                 l_ood_i = n_sample_loss_ood[i].cpu()
                 n_sample_log.update({f"{mode}/n_sample_loss_ood": l_ood_i})
+                n_sample_log.update(
+                    {
+                        f"{mode}/n_sample_loss_ood_hist": wandb.Histogram(
+                            loss_ood_all[i].cpu(), num_bins=hist_num_bins
+                        ),
+                    }
+                )
+            new_df = pd.DataFrame(
+                {
+                    "n_samples": torch.full((len(loss_train_all[i]),), n_samples),
+                    "loss_train": loss_train_all[i].cpu(),
+                    "loss_nexttoken": loss_nexttoken_all[i].cpu(),
+                    "loss_ood": loss_ood_all[i].cpu(),
+                }
+            )
+            df = pd.concat([df, new_df], ignore_index=True)
+
             self.logger.experiment.log(n_sample_log)
+        print("Finished building dataframe")
+        print("Plotting train loss")
+        self.plot_and_log_scatter(df, mode, "loss_train")
+        print("Plotting next-token loss")
+        self.plot_and_log_scatter(df, mode, "loss_nexttoken")
+        if self.has_ood:
+            print("Plotting OOD loss")
+            self.plot_and_log_scatter(df, mode, "loss_ood")
+
+        # table = wandb.Table(dataframe=df)
+        # n_sample_l
+        # train_plot = wandb.plot.scatter(
+        #     table, "n_samples", "loss_train", title="Train Loss"
+        # )
+        # nexttoken_plot = wandb.plot.scatter(
+        #     table, "n_samples", "loss_nexttoken", title="Next-Token Loss"
+        # )
+        # if self.has_ood:
+        #     ood_plot = wandb.plot.scatter(
+        #         table, "n_samples", "loss_ood", title="OOD Loss"
+        #     )
+
+        # self.logger.experiment.log(
+        #     {
+        #         f"{mode}/train_scatter_plot": train_plot,
+        #         f"{mode}/nexttoken_scatter_plot": nexttoken_plot,
+        #         f"{mode}/ood_scatter_plot": ood_plot,
+        #     }
+        # )
+
+    def plot_and_log_scatter(self, df, mode, ylabel, alpha=0.1, point_size=10):
+        fig, ax = plt.subplots(figsize=(10, 6))
+        sns.scatterplot(
+            data=df, x="n_samples", y=ylabel, alpha=alpha, s=point_size, ax=ax
+        )
+        ax.set_xscale("log")  # Set x-axis to logarithmic scale
+        ax.set_title(f"{ylabel} vs. Number of Samples")
+        ax.set_xlabel("Number of Samples")
+        ax.set_ylabel(ylabel)
+
+        self.logger.experiment.log({f"{mode}/{ylabel}_scatter_plot": wandb.Image(fig)})
 
     @torch.inference_mode()
     def log_effective_zdim(self, mode: Literal["train_tasks", "val_tasks"]):
@@ -260,7 +392,9 @@ class MetaOptimizerExplicit(ABC, LightningModule):
         return loss
 
     @abstractmethod
-    def loss_function(self, target: dict[str, Tensor], preds: dict[str, Tensor]) -> Tensor:
+    def loss_function(
+        self, target: dict[str, Tensor], preds: dict[str, Tensor]
+    ) -> Tensor:
         """Do not average across samples and tasks! Return shape should be
 
         Args:
@@ -298,7 +432,9 @@ class MetaOptimizerImplicit(ABC, LightningModule):
         self.model = model
 
     @beartype
-    def forward(self, x: dict[str, Tensor]) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
+    def forward(
+        self, x: dict[str, Tensor]
+    ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
         """Return the next-token predictions.
 
         Args:
@@ -311,9 +447,12 @@ class MetaOptimizerImplicit(ABC, LightningModule):
         """
         preds_nexttoken = self.model.forward(x)
         preds_nexttoken = {
-            name: preds_nexttoken[name][self.hparams.min_train_samples - 1 :] for name in preds_nexttoken
+            name: preds_nexttoken[name][self.hparams.min_train_samples - 1 :]
+            for name in preds_nexttoken
         }
-        x_nexttoken = {name: x[name][self.hparams.min_train_samples - 1 :] for name in x}
+        x_nexttoken = {
+            name: x[name][self.hparams.min_train_samples - 1 :] for name in x
+        }
         return preds_nexttoken, x_nexttoken
 
     @beartype
@@ -361,7 +500,9 @@ class MetaOptimizerImplicit(ABC, LightningModule):
         for i in range(len(n_sample_loss_nexttoken)):
             n_samples = i + self.hparams.min_train_samples - 1
             l = n_sample_loss_nexttoken[i].cpu()
-            self.logger.experiment.log({"n_samples": n_samples, f"{mode}/n_sample_loss_nexttoken": l})
+            self.logger.experiment.log(
+                {"n_samples": n_samples, f"{mode}/n_sample_loss_nexttoken": l}
+            )
 
     @beartype
     def losses_and_metrics(
@@ -390,7 +531,9 @@ class MetaOptimizerImplicit(ABC, LightningModule):
         return loss
 
     @abstractmethod
-    def loss_function(self, target: dict[str, Tensor], preds: dict[str, Tensor]) -> Tensor:
+    def loss_function(
+        self, target: dict[str, Tensor], preds: dict[str, Tensor]
+    ) -> Tensor:
         """Do not average across samples and tasks! Return shape should be
 
         Args:
